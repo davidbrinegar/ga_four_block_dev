@@ -432,6 +432,7 @@ extends: [event_funnel, page_funnel]
                   or REGEXP_CONTAINS(${session_attribution_campaign}, r"^(.*(([^a-df-z]|^)shop|shopping).*)$") = true
                   then 'Organic Shopping'
 
+
                 -- ORGANIC SOCIAL
                 when ${session_attribution_source} IN (SELECT sl FROM ${social_list.SQL_TABLE_NAME})
                   or REGEXP_CONTAINS(${session_attribution_medium}, r"(social|social-network|social-media|sm|social network|social media)") = true
@@ -451,11 +452,9 @@ extends: [event_funnel, page_funnel]
                 when REGEXP_CONTAINS(${session_attribution_medium}, r"email|e-mail|e_mail|e mail") = true
                   or REGEXP_CONTAINS(${session_attribution_source}, r"email|e-mail|e_mail|e mail") = true
                   then 'Email'
-
                 -- AFFILIATES
                 when REGEXP_CONTAINS(${session_attribution_medium}, r"affiliate|affiliates") = true
                   then 'Affiliates'
-
                 -- REFERRAL
                 when ${session_attribution_medium} = 'referral'
                   then 'Referral'
@@ -655,6 +654,30 @@ extends: [event_funnel, page_funnel]
       sql: ${geo_data}.geo__region ;;
       map_layer_name: us_states
     }
+
+  # ## GA4 BQML fields ##
+
+  # parameter: prediction_window_days {
+  #   view_label: "BQML"
+  #   type: number
+  # }
+  # dimension: x_days_future_purchases {
+  #   view_label: "BQML"
+  #   type: number
+  #   sql: (SELECT COUNT (DISTINCT e.ecommerce.transaction_id)
+  #         FROM ${sessions.SQL_TABLE_NAME} as s
+  #         LEFT JOIN UNNEST(event_data) as e
+  #         WHERE s.user_pseudo_id = ${user_pseudo_id}
+  #           AND s.session_data.session_start > ${TABLE}.session_data.session_start
+  #           AND date_diff(s.session_data.session_start,${TABLE}.session_data.session_start,DAY) < {% parameter prediction_window_days %} --X days, in seconds
+  #         ) ;;
+  # }
+  # dimension: will_purchase_in_future {
+  #   view_label: "BQML"
+  #   type: number
+  #   sql: IF(${x_days_future_purchases} >0,1,0) ;;
+  # }
+  # ## END - GA4 BQML fields ##
 
   # ## GA4 BQML fields ##
 
