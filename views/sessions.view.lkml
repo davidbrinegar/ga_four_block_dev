@@ -9,51 +9,6 @@ view: sessions {
     increment_key: "session_date"
     increment_offset: 3
     sql: with
--- obtains a list of sessions, uniquely identified by the table date, ga_session_id event parameter, ga_session_number event parameter, and the user_pseudo_id.
-session_list_with_event_history as (
-  select timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+'))) session_date
-      ,  (select value.int_value from UNNEST(events.event_params) where key = "ga_session_id") ga_session_id
-      ,  (select value.int_value from UNNEST(events.event_params) where key = "ga_session_number") ga_session_number
-      ,  events.user_pseudo_id
-      -- unique key for session:
-      ,  timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+')))||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_id")||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_number")||events.user_pseudo_id sl_key
-      ,  row_number() over (partition by (timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+')))||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_id")||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_number")||events.user_pseudo_id) order by events.event_timestamp) event_rank
-      ,  (TIMESTAMP_DIFF(TIMESTAMP_MICROS(LEAD(events.event_timestamp) OVER (PARTITION BY timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+')))||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_id")||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_number")||events.user_pseudo_id ORDER BY events.event_timestamp asc))
-         ,TIMESTAMP_MICROS(events.event_timestamp),second)/86400.0) time_to_next_event
-      , case when events.event_name = 'page_view' then row_number() over (partition by (timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+')))||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_id")||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_number")||events.user_pseudo_id), case when events.event_name = 'page_view' then true else false end order by events.event_timestamp)
-        else 0 end as page_view_rank
-      , case when events.event_name = 'page_view' then row_number() over (partition by (timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+')))||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_id")||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_number")||events.user_pseudo_id), case when events.event_name = 'page_view' then true else false end order by events.event_timestamp desc)
-        else 0 end as page_view_reverse_rank
-      , case when events.event_name = 'page_view' then (TIMESTAMP_DIFF(TIMESTAMP_MICROS(LEAD(events.event_timestamp) OVER (PARTITION BY timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+')))||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_id")||(select value.int_value from UNNEST(events.event_params) where key = "ga_session_number")||events.user_pseudo_id , case when events.event_name = 'page_view' then true else false end ORDER BY events.event_timestamp asc))
-         ,TIMESTAMP_MICROS(events.event_timestamp),second)/86400.0) else null end as time_to_next_page -- this window function yields 0 duration results when session page_view count = 1.
-      -- raw event data:
-      , events.event_date
-      , events.event_timestamp
-      , events.event_name
-      , events.event_params
-      , events.event_previous_timestamp
-      , events.event_value_in_usd
-      , events.event_bundle_sequence_id
-      , events.event_server_timestamp_offset
-      , events.user_id
-      -- , events.user_pseudo_id
-      , events.user_properties
-      , events.user_first_touch_timestamp
-      , events.user_ltv
-      , events.device
-      , events.geo
-      , events.app_info
-      , events.traffic_source
-      , events.stream_id
-      , events.platform
-      , events.event_dimensions
-      , events.ecommerce
-      , events.items
-        from `@{GA4_SCHEMA}.@{GA4_TABLE_VARIABLE}` events
-        where {% incrementcondition %} timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+'))) {%  endincrementcondition %}
-        -- where timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+'))) >= ((TIMESTAMP_ADD(TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), DAY), INTERVAL -29 DAY)))
-        --   and  timestamp(PARSE_DATE('%Y%m%d', REGEXP_EXTRACT(_TABLE_SUFFIX,r'[0-9]+'))) <= ((TIMESTAMP_ADD(TIMESTAMP_ADD(TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), DAY), INTERVAL -29 DAY), INTERVAL 30 DAY)))
-  ),
 
 -- Session-Level Facts, session start, end, duration
 session_facts as (
@@ -68,7 +23,7 @@ session_facts as (
             , MAX(TIMESTAMP_MICROS(sl.event_timestamp)) as session_end
             , MIN(TIMESTAMP_MICROS(sl.event_timestamp)) as session_start
             , (MAX(sl.event_timestamp) - MIN(sl.event_timestamp))/(60 * 1000 * 1000) AS session_length_minutes
-  from session_list_with_event_history sl
+  from ${session_event_history.SQL_TABLE_NAME} sl
   group by 1
   ),
 
@@ -79,7 +34,7 @@ session_tags as (
       ,  first_value((select value.string_value from unnest(sl.event_params) where key = 'source')) over (partition by sl.sl_key order by sl.event_timestamp desc) source
       ,  first_value((select value.string_value from unnest(sl.event_params) where key = 'campaign')) over (partition by sl.sl_key order by sl.event_timestamp desc) campaign
       ,  first_value((select value.string_value from unnest(sl.event_params) where key = 'page_referrer')) over (partition by sl.sl_key order by sl.event_timestamp desc) page_referrer
-  from session_list_with_event_history sl
+  from ${session_event_history.SQL_TABLE_NAME} sl
   where sl.event_name in ('page_view')
     and (select value.string_value from unnest(sl.event_params) where key = 'medium') is not null -- NULL medium is direct, filtering out nulls to ensure last non-direct.
   ),
@@ -100,9 +55,8 @@ device_geo as (
       ,  sl.device.language device__language
       ,  sl.device.time_zone_offset_seconds device__time_zone_offset_seconds
       ,  sl.device.is_limited_ad_tracking device__is_limited_ad_tracking
-      ,  sl.device.web_info.browser device__web_info_browser
+      ,  'Browser' device__web_info_browser
       ,  sl.device.web_info.browser_version device__web_info_browser_version
-      ,  sl.device.web_info.hostname device__web_info_hostname
       ,  case when sl.device.category = 'mobile' then true else false end as device__is_mobile
       ,  sl.geo.continent geo__continent
       ,  sl.geo.country geo__country
@@ -110,7 +64,7 @@ device_geo as (
       ,  sl.geo.metro geo__metro
       ,  sl.geo.sub_continent geo__sub_continent
       ,  sl.geo.region geo__region
-  from session_list_with_event_history sl
+  from ${session_event_history.SQL_TABLE_NAME} sl
   where sl.event_name = 'session_start'
   ),
 
@@ -149,7 +103,7 @@ session_event_packing as (
                           , sl.event_dimensions
                           , sl.ecommerce
                           , sl.items)) event_data
-  from session_list_with_event_history sl
+  from ${session_event_history.SQL_TABLE_NAME} sl
   group by 1,2,3,4,5
   )
 
@@ -187,7 +141,7 @@ select se.session_date session_date
                       ,  d.device__is_limited_ad_tracking
                       ,  d.device__web_info_browser
                       ,  d.device__web_info_browser_version
-                      ,  d.device__web_info_hostname
+                      ,  'www.googlemerchandisestore.com' device__web_info_hostname
                       ,  d.device__is_mobile) device_data
     ,  (SELECT AS STRUCT d.geo__continent
                       ,  d.geo__country
@@ -203,6 +157,7 @@ left join session_facts sf
   on  se.sl_key = sf.sl_key
 left join device_geo d
   on  se.sl_key = d.sl_key
+where {% incrementcondition %} se.session_date {%  endincrementcondition %}
    ;;
   }
 
@@ -436,30 +391,87 @@ extends: [event_funnel, page_funnel]
       group_label: "Session Traffic Source"
       label: "Channel"
       description: "Default Channel Grouping as defined in https://support.google.com/analytics/answer/9756891?hl=en"
-      sql: case when ${session_attribution_source} = '(direct)'
+      ## UPDATED: 2022-07-27
+      sql: case
+                -- DIRECT
+                when ${session_attribution_source} = '(direct)'
                  and (${session_attribution_medium} = '(none)' or ${session_attribution_medium} = '(not set)')
                   then 'Direct'
-                when ${session_attribution_medium} = 'organic'
-                  then 'Organic Search'
-                when REGEXP_CONTAINS(${session_attribution_source}, r"^(facebook|instagram|pinterest|reddit|twitter|linkedin)") = true
-                 and REGEXP_CONTAINS(${session_attribution_medium}, r"^(cpc|ppc|paid)") = true
+
+                -- CROSS-NETWORK
+                when ${session_attribution_campaign} like '%cross-network%'
+                  then 'Cross-Network'
+
+                -- PAID SHOPPING
+                when (${session_attribution_source} IN (SELECT sl FROM ${shopping_list.SQL_TABLE_NAME})
+                  or REGEXP_CONTAINS(${session_attribution_campaign}, r"^(.*(([^a-df-z]|^)shop|shopping).*)$") = true )
+                 and REGEXP_CONTAINS(${session_attribution_medium}, r"^(.*cp.*|ppc|paid.*)$") = true
+                  then 'Paid Shopping'
+
+                -- PAID SEARCH
+                when ${session_attribution_source} IN (SELECT sl FROM ${search_list.SQL_TABLE_NAME})
+                 and REGEXP_CONTAINS(${session_attribution_medium}, r"^(.*cp.*|ppc|paid.*)$") = true
+                  then 'Paid Search'
+
+                -- PAID SOCIAL
+                when ${session_attribution_source} IN (SELECT sl FROM ${social_list.SQL_TABLE_NAME})
+                 and REGEXP_CONTAINS(${session_attribution_medium}, r"^(.*cp.*|ppc|paid.*)$") = true
                   then 'Paid Social'
-                when REGEXP_CONTAINS(${session_attribution_source}, r"^(facebook|instagram|pinterest|reddit|twitter|linkedin)") = true
-                  or REGEXP_CONTAINS(${session_attribution_medium}, r"^(social|social-network|social-media|sm|social network|social media)") = true
+
+                -- PAID VIDEO
+                when ${session_attribution_source} IN (SELECT sl FROM ${video_list.SQL_TABLE_NAME})
+                 and REGEXP_CONTAINS(${session_attribution_medium}, r"^(.*cp.*|ppc|paid.*)$") = true
+                  then 'Paid Video'
+
+                -- DISPLAY
+                when REGEXP_CONTAINS(${session_attribution_medium}, r"^(display|cpm|banner|expandable|interstitial)$")
+                  then 'Display'
+
+                -- ORGANIC SHOPPING
+                when ${session_attribution_source} IN (SELECT sl FROM ${shopping_list.SQL_TABLE_NAME})
+                  or REGEXP_CONTAINS(${session_attribution_campaign}, r"^(.*(([^a-df-z]|^)shop|shopping).*)$") = true
+                  then 'Organic Shopping'
+
+                -- ORGANIC SOCIAL
+                when ${session_attribution_source} IN (SELECT sl FROM ${social_list.SQL_TABLE_NAME})
+                  or REGEXP_CONTAINS(${session_attribution_medium}, r"(social|social-network|social-media|sm|social network|social media)") = true
                   then 'Organic Social'
+
+                -- ORGANIC VIDEO
+                when ${session_attribution_source} IN (SELECT sl FROM ${video_list.SQL_TABLE_NAME})
+                  or REGEXP_CONTAINS(${session_attribution_medium}, r"^(.*video.*)$") = true
+                  then 'Organic Video'
+
+                -- ORGANIC SEARCH
+                when ${session_attribution_source} IN (SELECT sl FROM ${search_list.SQL_TABLE_NAME})
+                  or ${session_attribution_medium} = 'organic'
+                  then 'Organic Search'
+
+                -- EMAIL
                 when REGEXP_CONTAINS(${session_attribution_medium}, r"email|e-mail|e_mail|e mail") = true
                   or REGEXP_CONTAINS(${session_attribution_source}, r"email|e-mail|e_mail|e mail") = true
                   then 'Email'
+
+                -- AFFILIATES
                 when REGEXP_CONTAINS(${session_attribution_medium}, r"affiliate|affiliates") = true
                   then 'Affiliates'
+
+                -- REFERRAL
                 when ${session_attribution_medium} = 'referral'
                   then 'Referral'
-                when REGEXP_CONTAINS(${session_attribution_medium}, r"^(cpc|ppc|paidsearch)$")
-                  then 'Paid Search'
-                when REGEXP_CONTAINS(${session_attribution_medium}, r"^(display|cpm|banner)$")
-                  then 'Display'
-                when REGEXP_CONTAINS(${session_attribution_medium}, r"^(cpv|cpa|cpp|content-text)$")
-                  then 'Other Advertising'
+
+                -- AUDIO
+                when ${session_attribution_medium} = 'audio'
+                  then 'Audio'
+
+                -- SMS
+                when ${session_attribution_medium} = 'sms'
+                  then 'SMS'
+
+                -- MOBILE PUSH NOTIFICATIONS
+                when ${session_attribution_medium} like '%push'
+                  or REGEXP_CONTAINS(${session_attribution_medium}, r"^(mobile|notification)$")
+                  then 'Mobile Push Notifications'
                 else '(Other)' end ;;
     }
 
@@ -643,6 +655,30 @@ extends: [event_funnel, page_funnel]
       sql: ${geo_data}.geo__region ;;
       map_layer_name: us_states
     }
+
+  # ## GA4 BQML fields ##
+
+  # parameter: prediction_window_days {
+  #   view_label: "BQML"
+  #   type: number
+  # }
+  # dimension: x_days_future_purchases {
+  #   view_label: "BQML"
+  #   type: number
+  #   sql: (SELECT COUNT (DISTINCT e.ecommerce.transaction_id)
+  #         FROM ${sessions.SQL_TABLE_NAME} as s
+  #         LEFT JOIN UNNEST(event_data) as e
+  #         WHERE s.user_pseudo_id = ${user_pseudo_id}
+  #           AND s.session_data.session_start > ${TABLE}.session_data.session_start
+  #           AND date_diff(s.session_data.session_start,${TABLE}.session_data.session_start,DAY) < {% parameter prediction_window_days %} --X days, in seconds
+  #         ) ;;
+  # }
+  # dimension: will_purchase_in_future {
+  #   view_label: "BQML"
+  #   type: number
+  #   sql: IF(${x_days_future_purchases} >0,1,0) ;;
+  # }
+  # ## END - GA4 BQML fields ##
 
 ## Measures
 
